@@ -204,6 +204,10 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 							Name:      "transcode",
 							MountPath: "/transcode",
 						},
+						{
+							Name:      "dri",
+							MountPath: "/dev/dri",
+						},
 					},
 				},
 			},
@@ -225,6 +229,15 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 					},
 				},
 				transcodeVolume(),
+				{
+					Name: "dri",
+					VolumeSource: corev1.VolumeSource{
+						HostPath: &corev1.HostPathVolumeSource{
+							Path: "/dev/dri",
+							Type: hostPathTypePtr(corev1.HostPathDirectory),
+						},
+					},
+				},
 			},
 		},
 	}
