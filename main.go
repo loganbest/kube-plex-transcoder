@@ -233,6 +233,12 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 							Name:      "transcode",
 							MountPath: "/transcode",
 						},
+						// EAE (Easy Audio Encoder) hardcodes /tmp and ignores TMPDIR; mount transcode at /tmp
+						// so EAE watchfolder writes succeed. See: munnerz/kube-plex#93
+						{
+							Name:      "transcode",
+							MountPath: "/tmp",
+						},
 						{
 							Name:      "dri",
 							MountPath: "/dev/dri",
