@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -79,7 +81,13 @@ func main() {
 		slog.Error("failed to create pod", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("pod created", "pod", pod.Name, "namespace", namespace)
+	cmd := pod.Spec.Containers[0].Command
+	slog.Info("pod created",
+		"pod", pod.Name,
+		"namespace", namespace,
+		"image", pmsImage,
+		"command", cmd,
+	)
 
 	doneCh := make(chan error)
 	go func() {
@@ -259,6 +267,69 @@ func toCoreV1EnvVar(in []string) []corev1.EnvVar {
 	return out
 }
 
+func logPodLogs(ctx context.Context, cl kubernetes.Interface, pod *corev1.Pod) {
+	tailLines := int64(200)
+	for _, c := range pod.Spec.Containers {
+		opts := &corev1.PodLogOptions{
+			Container: c.Name,
+			TailLines: &tailLines,
+		}
+		req := cl.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, opts)
+		stream, err := req.Stream(ctx)
+		if err != nil {
+			slog.Warn("failed to get pod logs", "pod", pod.Name, "container", c.Name, "err", err)
+			continue
+		}
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, stream); err != nil {
+			stream.Close()
+			slog.Warn("failed to read pod logs", "pod", pod.Name, "container", c.Name, "err", err)
+			continue
+		}
+		stream.Close()
+		logs := strings.TrimSpace(buf.String())
+		if logs != "" {
+			slog.Info("pod container logs", "pod", pod.Name, "container", c.Name, "logs", logs)
+		}
+	}
+}
+
+func formatPodFailureReason(pod *corev1.Pod) string {
+	var parts []string
+	if pod.Status.Reason != "" {
+		parts = append(parts, fmt.Sprintf("reason=%s", pod.Status.Reason))
+	}
+	if pod.Status.Message != "" {
+		parts = append(parts, fmt.Sprintf("message=%s", pod.Status.Message))
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Terminated != nil {
+			t := cs.State.Terminated
+			parts = append(parts, fmt.Sprintf("container=%s exitCode=%d reason=%s",
+				cs.Name, t.ExitCode, t.Reason))
+			if t.Message != "" {
+				parts = append(parts, fmt.Sprintf("containerMsg=%s", t.Message))
+			}
+		}
+		if cs.State.Waiting != nil {
+			w := cs.State.Waiting
+			parts = append(parts, fmt.Sprintf("container=%s waiting reason=%s",
+				cs.Name, w.Reason))
+			if w.Message != "" {
+				parts = append(parts, fmt.Sprintf("waitingMsg=%s", w.Message))
+			}
+		}
+		if cs.LastTerminationState.Terminated != nil {
+			t := cs.LastTerminationState.Terminated
+			parts = append(parts, fmt.Sprintf("lastExit=%d lastReason=%s", t.ExitCode, t.Reason))
+		}
+	}
+	if len(parts) == 0 {
+		return "no status details available"
+	}
+	return strings.Join(parts, "; ")
+}
+
 func waitForPodCompletion(ctx context.Context, cl kubernetes.Interface, pod *corev1.Pod) error {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -274,7 +345,8 @@ func waitForPodCompletion(ctx context.Context, cl kubernetes.Interface, pod *cor
 		case corev1.PodUnknown:
 			slog.Warn("pod in unknown state", "pod", pod.Name)
 		case corev1.PodFailed:
-			return fmt.Errorf("pod %q failed", pod.Name)
+			logPodLogs(ctx, cl, pod)
+			return fmt.Errorf("pod %q failed: %s", pod.Name, formatPodFailureReason(pod))
 		case corev1.PodSucceeded:
 			return nil
 		}
