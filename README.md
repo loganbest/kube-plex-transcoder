@@ -39,6 +39,21 @@ env:
 
 With `TRANSCODE_PVC` (shared storage), this is not required.
 
+### Debug logging
+
+Set `TRANSCODER_DEBUG=1` (or `true`/`yes`/`on`) in your PMS container env to force
+`-loglevel debug` and `-loglevel_plex debug` for transcoder output. This produces
+more verbose logs when troubleshooting.
+
+### Writeability check
+
+Each transcoder pod runs an init container that tests writeability of `/tmp` and
+`/transcode` before the main transcoder starts. View the init container logs with:
+
+```bash
+kubectl logs <pod-name> -c check-writeability -n <namespace>
+```
+
 ## Setup
 
 This guide will go through setting up a Plex Media Server instance on a

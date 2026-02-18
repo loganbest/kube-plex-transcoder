@@ -40,6 +40,9 @@ var namespace = os.Getenv("KUBE_NAMESPACE")
 var pmsImage = os.Getenv("PMS_IMAGE")
 var pmsInternalAddress = os.Getenv("PMS_INTERNAL_ADDRESS")
 
+// transcodeDebug, when set (e.g. "1" or "true"), forces -loglevel debug for transcoder output
+var transcodeDebug = os.Getenv("TRANSCODER_DEBUG")
+
 func main() {
 	env := os.Environ()
 	args := os.Args
@@ -160,9 +163,19 @@ func rewriteArgs(in []string) {
 		case "-progressurl", "-manifest_name", "-segment_list":
 			in[i+1] = strings.Replace(in[i+1], "http://127.0.0.1:32400", pmsInternalAddress, 1)
 		case "-loglevel", "-loglevel_plex":
-			in[i+1] = "debug"
+			if isTranscodeDebugEnabled() {
+				in[i+1] = "debug"
+			}
 		}
 	}
+}
+
+func isTranscodeDebugEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(transcodeDebug)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func hostPathTypePtr(t corev1.HostPathType) *corev1.HostPathType {
@@ -196,6 +209,9 @@ func transcodeVolume() corev1.Volume {
 
 func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 	envVars := toCoreV1EnvVar(env)
+	if isTranscodeDebugEnabled() {
+		envVars = append(envVars, corev1.EnvVar{Name: "PLEX_LOGLEVEL", Value: "debug"})
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "pms-elastic-transcoder-",
@@ -205,6 +221,24 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 				"kubernetes.io/arch": "amd64",
 			},
 			RestartPolicy: corev1.RestartPolicyNever,
+			InitContainers: []corev1.Container{
+				{
+					Name:  "check-writeability",
+					Image: "busybox:1.36",
+					Command: []string{"/bin/sh", "-c", `echo "=== /tmp writeability test ==="
+if touch /tmp/kube-plex-write-test 2>/dev/null; then echo "OK: /tmp is writable"; rm -f /tmp/kube-plex-write-test; else echo "FAIL: /tmp is not writable"; fi
+echo "=== /transcode writeability test ==="
+if touch /transcode/kube-plex-write-test 2>/dev/null; then echo "OK: /transcode is writable"; rm -f /transcode/kube-plex-write-test; else echo "FAIL: /transcode is not writable"; fi
+echo "=== EAE-style path test (/tmp/pms-xxx/EasyAudioEncoder/Convert to WAV (to 8ch or less)/) ==="
+mkdir -p "/tmp/pms-eae-test/EasyAudioEncoder/Convert to WAV (to 8ch or less)" 2>/dev/null || true
+if touch "/tmp/pms-eae-test/EasyAudioEncoder/Convert to WAV (to 8ch or less)/test.tmp" 2>/dev/null; then echo "OK: EAE-style path is writable"; rm -rf /tmp/pms-eae-test; else echo "FAIL: EAE-style path is not writable"; fi
+echo "=== Writeability check complete ==="`},
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "transcode", MountPath: "/transcode"},
+						{Name: "transcode", MountPath: "/tmp"},
+					},
+				},
+			},
 			Containers: []corev1.Container{
 				{
 					Name:       "plex",
