@@ -206,6 +206,9 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 				"kubernetes.io/arch": "amd64",
 			},
 			RestartPolicy: corev1.RestartPolicyNever,
+			SecurityContext: &corev1.PodSecurityContext{
+				FSGroup: ptr(int64(1000)), // plex user - makes /tmp (emptyDir) writable by plex for EAE
+			},
 			Containers: []corev1.Container{
 				{
 					Name:       "plex",
