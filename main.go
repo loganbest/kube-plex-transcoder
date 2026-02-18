@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -287,7 +289,12 @@ func logPodLogs(ctx context.Context, cl kubernetes.Interface, pod *corev1.Pod) {
 		req := cl.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, opts)
 		stream, err := req.Stream(ctx)
 		if err != nil {
-			slog.Warn("failed to get pod logs", "pod", pod.Name, "container", c.Name, "err", err)
+			if strings.Contains(err.Error(), "forbidden") || strings.Contains(err.Error(), "cannot get") {
+				slog.Warn("cannot fetch pod logs: service account needs pods/log permission",
+					"pod", pod.Name, "container", c.Name, "hint", "see deploy/rbac-pod-logs.yaml")
+			} else {
+				slog.Warn("failed to get pod logs", "pod", pod.Name, "container", c.Name, "err", err)
+			}
 			continue
 		}
 		var buf bytes.Buffer
@@ -299,9 +306,47 @@ func logPodLogs(ctx context.Context, cl kubernetes.Interface, pod *corev1.Pod) {
 		stream.Close()
 		logs := strings.TrimSpace(buf.String())
 		if logs != "" {
-			slog.Info("pod container logs", "pod", pod.Name, "container", c.Name, "logs", logs)
+			if summary := extractLogSummary(logs); summary != "" {
+				slog.Info("pod container logs (errors/warnings)", "pod", pod.Name, "container", c.Name, "summary", summary)
+			}
+			slog.Info("pod container logs (full)", "pod", pod.Name, "container", c.Name, "logs", logs)
 		}
 	}
+}
+
+// extractLogSummary extracts error/warning lines from Plex Transcoder logs.
+// Plex sends FFmpeg output via POST URLs with message= param; we decode and filter.
+var messageParamRE = regexp.MustCompile(`message=([^&\s]+)`)
+
+func extractLogSummary(logs string) string {
+	var lines []string
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(logs, "\n") {
+		if !strings.Contains(line, "message=") {
+			continue
+		}
+		matches := messageParamRE.FindStringSubmatch(line)
+		if len(matches) < 2 {
+			continue
+		}
+		decoded, err := url.QueryUnescape(matches[1])
+		if err != nil {
+			continue
+		}
+		// Keep errors and warnings (level=0 or level=3), skip verbose (level=4)
+		if strings.Contains(line, "level=4&message=") {
+			continue
+		}
+		lower := strings.ToLower(decoded)
+		if strings.Contains(lower, "error") || strings.Contains(lower, "failed") ||
+			strings.Contains(lower, "warning") || strings.Contains(lower, "invalid") {
+			if !seen[decoded] {
+				seen[decoded] = true
+				lines = append(lines, decoded)
+			}
+		}
+	}
+	return strings.Join(lines, "; ")
 }
 
 func formatPodFailureReason(pod *corev1.Pod) string {
