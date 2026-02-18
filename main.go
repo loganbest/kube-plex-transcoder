@@ -169,6 +169,10 @@ func hostPathTypePtr(t corev1.HostPathType) *corev1.HostPathType {
 	return &t
 }
 
+func ptr[T any](v T) *T {
+	return &v
+}
+
 func transcodeVolume() corev1.Volume {
 	if transcodePVC != "" {
 		return corev1.Volume{
@@ -209,6 +213,9 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 					Image:      pmsImage,
 					Env:        envVars,
 					WorkingDir: cwd,
+					SecurityContext: &corev1.SecurityContext{
+						Privileged: ptr(true),
+					},
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "data",
