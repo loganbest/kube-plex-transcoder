@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -55,7 +56,7 @@ func main() {
 	}
 	pod := generatePod(cwd, env, args)
 
-	cfg, err := clientcmd.BuildConfigFromFlags("", "")
+	cfg, err := getKubeConfig()
 	if err != nil {
 		slog.Error("failed to build kubeconfig", "err", err)
 		os.Exit(1)
@@ -111,6 +112,15 @@ func main() {
 		slog.Error("failed to delete pod", "pod", pod.Name, "err", err)
 		os.Exit(1)
 	}
+}
+
+func getKubeConfig() (*rest.Config, error) {
+	// Try in-cluster config first (when running inside a pod) - avoids clientcmd warning
+	if cfg, err := rest.InClusterConfig(); err == nil {
+		return cfg, nil
+	}
+	// Fall back to kubeconfig for local dev or when KUBECONFIG is set
+	return clientcmd.BuildConfigFromFlags("", "")
 }
 
 func validateRequiredEnv() error {
