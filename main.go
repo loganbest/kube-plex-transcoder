@@ -197,6 +197,8 @@ func transcodeVolume() corev1.Volume {
 
 func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 	envVars := toCoreV1EnvVar(env)
+	// EAE needs a writable temp dir; use /transcode instead of /tmp (avoids emptyDir permission issues)
+	envVars = append(envVars, corev1.EnvVar{Name: "TMPDIR", Value: "/transcode"})
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "pms-elastic-transcoder-",
@@ -206,9 +208,6 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 				"kubernetes.io/arch": "amd64",
 			},
 			RestartPolicy: corev1.RestartPolicyNever,
-			SecurityContext: &corev1.PodSecurityContext{
-				FSGroup: ptr(int64(1000)), // plex user - makes /tmp (emptyDir) writable by plex for EAE
-			},
 			Containers: []corev1.Container{
 				{
 					Name:       "plex",
@@ -238,10 +237,6 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 							Name:      "dri",
 							MountPath: "/dev/dri",
 						},
-						{
-							Name:      "tmp",
-							MountPath: "/tmp",
-						},
 					},
 				},
 			},
@@ -270,12 +265,6 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 							Path: "/dev/dri",
 							Type: hostPathTypePtr(corev1.HostPathDirectory),
 						},
-					},
-				},
-				{
-					Name: "tmp",
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{},
 					},
 				},
 			},
