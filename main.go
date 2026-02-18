@@ -235,6 +235,10 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 							Name:      "dri",
 							MountPath: "/dev/dri",
 						},
+						{
+							Name:      "tmp",
+							MountPath: "/tmp",
+						},
 					},
 				},
 			},
@@ -263,6 +267,12 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 							Path: "/dev/dri",
 							Type: hostPathTypePtr(corev1.HostPathDirectory),
 						},
+					},
+				},
+				{
+					Name: "tmp",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
 					},
 				},
 			},
