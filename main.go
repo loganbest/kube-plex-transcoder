@@ -21,8 +21,11 @@ var dataPVC = os.Getenv("DATA_PVC")
 // config pvc name
 var configPVC = os.Getenv("CONFIG_PVC")
 
-// transcode pvc name
+// transcode pvc name (preferred)
 var transcodePVC = os.Getenv("TRANSCODE_PVC")
+
+// transcode hostPath directory (fallback when TRANSCODE_PVC is not set)
+var transcodeDir = os.Getenv("TRANSCODE_DIR")
 
 // pms namespace
 var namespace = os.Getenv("KUBE_NAMESPACE")
@@ -35,6 +38,11 @@ var pmsInternalAddress = os.Getenv("PMS_INTERNAL_ADDRESS")
 func main() {
 	env := os.Environ()
 	args := os.Args
+
+	if err := validateRequiredEnv(); err != nil {
+		slog.Error("missing required environment variable", "err", err)
+		os.Exit(1)
+	}
 
 	rewriteEnv(env)
 	rewriteArgs(args)
@@ -88,11 +96,34 @@ func main() {
 	}
 
 	slog.Info("cleaning up pod", "pod", pod.Name)
-	err = kubeClient.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
+	// Use a fresh context for cleanup so Delete succeeds even after shutdown signal (ctx is cancelled)
+	cleanupCtx := context.WithoutCancel(ctx)
+	err = kubeClient.CoreV1().Pods(pod.Namespace).Delete(cleanupCtx, pod.Name, metav1.DeleteOptions{})
 	if err != nil {
 		slog.Error("failed to delete pod", "pod", pod.Name, "err", err)
 		os.Exit(1)
 	}
+}
+
+func validateRequiredEnv() error {
+	required := []struct {
+		name string
+		val  string
+	}{
+		{"DATA_PVC", dataPVC},
+		{"CONFIG_PVC", configPVC},
+		{"KUBE_NAMESPACE", namespace},
+		{"PMS_IMAGE", pmsImage},
+	}
+	for _, r := range required {
+		if r.val == "" {
+			return fmt.Errorf("%s must be set", r.name)
+		}
+	}
+	if transcodePVC == "" && transcodeDir == "" {
+		return fmt.Errorf("either TRANSCODE_PVC or TRANSCODE_DIR must be set")
+	}
+	return nil
 }
 
 // rewriteEnv rewrites environment variables to be passed to the transcoder
@@ -102,12 +133,41 @@ func rewriteEnv(in []string) {
 
 func rewriteArgs(in []string) {
 	for i, v := range in {
+		if i+1 >= len(in) {
+			continue
+		}
 		switch v {
 		case "-progressurl", "-manifest_name", "-segment_list":
 			in[i+1] = strings.Replace(in[i+1], "http://127.0.0.1:32400", pmsInternalAddress, 1)
 		case "-loglevel", "-loglevel_plex":
 			in[i+1] = "debug"
 		}
+	}
+}
+
+func hostPathTypePtr(t corev1.HostPathType) *corev1.HostPathType {
+	return &t
+}
+
+func transcodeVolume() corev1.Volume {
+	if transcodePVC != "" {
+		return corev1.Volume{
+			Name: "transcode",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: transcodePVC,
+				},
+			},
+		}
+	}
+	return corev1.Volume{
+		Name: "transcode",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{
+				Path: transcodeDir,
+				Type: hostPathTypePtr(corev1.HostPathDirectoryOrCreate),
+			},
+		},
 	}
 }
 
@@ -132,7 +192,7 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "data",
-							MountPath: "/data",
+							MountPath: "/media",
 							ReadOnly:  true,
 						},
 						{
@@ -164,14 +224,7 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 						},
 					},
 				},
-				{
-					Name: "transcode",
-					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: transcodePVC,
-						},
-					},
-				},
+				transcodeVolume(),
 			},
 		},
 	}
@@ -194,6 +247,8 @@ func toCoreV1EnvVar(in []string) []corev1.EnvVar {
 }
 
 func waitForPodCompletion(ctx context.Context, cl kubernetes.Interface, pod *corev1.Pod) error {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 	for {
 		pod, err := cl.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 		if err != nil {
@@ -213,7 +268,7 @@ func waitForPodCompletion(ctx context.Context, cl kubernetes.Interface, pod *cor
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(1 * time.Second):
+		case <-ticker.C:
 		}
 	}
 }
