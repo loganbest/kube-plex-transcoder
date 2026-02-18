@@ -23,6 +23,22 @@ report information back to Plex about the state of the transcode job. At some
 point in the future this may change, but it is a required step in order to make
 transcodes work right now.
 
+### EAC3 audio (EAE) and hostPath transcode
+
+When using `TRANSCODE_DIR` (hostPath) instead of `TRANSCODE_PVC`, the transcoder
+pod must run on the same node as PMS so both share the same `/tmp` for EAE.
+Add this to your PMS container env to enable same-node scheduling:
+
+```yaml
+env:
+  - name: NODE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+```
+
+With `TRANSCODE_PVC` (shared storage), this is not required.
+
 ## Setup
 
 This guide will go through setting up a Plex Media Server instance on a

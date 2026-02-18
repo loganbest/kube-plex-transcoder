@@ -189,7 +189,6 @@ func transcodeVolume() corev1.Volume {
 		VolumeSource: corev1.VolumeSource{
 			HostPath: &corev1.HostPathVolumeSource{
 				Path: transcodeDir,
-				Type: hostPathTypePtr(corev1.HostPathDirectoryOrCreate),
 			},
 		},
 	}
@@ -197,9 +196,7 @@ func transcodeVolume() corev1.Volume {
 
 func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 	envVars := toCoreV1EnvVar(env)
-	// EAE needs a writable temp dir; use /transcode instead of /tmp (avoids emptyDir permission issues)
-	envVars = append(envVars, corev1.EnvVar{Name: "TMPDIR", Value: "/transcode"})
-	return &corev1.Pod{
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "pms-elastic-transcoder-",
 		},
@@ -233,8 +230,9 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 							Name:      "transcode",
 							MountPath: "/transcode",
 						},
-						// EAE (Easy Audio Encoder) hardcodes /tmp and ignores TMPDIR; mount transcode at /tmp
-						// so EAE watchfolder writes succeed. See: munnerz/kube-plex#93
+						// EAE (Easy Audio Encoder) hardcodes /tmp and ignores TMPDIR. Mount transcode at /tmp
+						// so EAE watchfolder writes succeed. With hostPath, transcoder must run on same node as PMS.
+						// Set NODE_NAME via downward API in your PMS deployment to enable same-node scheduling.
 						{
 							Name:      "transcode",
 							MountPath: "/tmp",
@@ -276,6 +274,28 @@ func generatePod(cwd string, env []string, args []string) *corev1.Pod {
 			},
 		},
 	}
+	// With hostPath transcode, transcoder must run on same node as PMS for shared /tmp.
+	// Set NODE_NAME via downward API (fieldRef: spec.nodeName) in your PMS deployment.
+	if nodeName := os.Getenv("NODE_NAME"); nodeName != "" {
+		pod.Spec.Affinity = &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{
+						{
+							MatchExpressions: []corev1.NodeSelectorRequirement{
+								{
+									Key:      "kubernetes.io/hostname",
+									Operator: corev1.NodeSelectorOpIn,
+									Values:   []string{nodeName},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+	return pod
 }
 
 func toCoreV1EnvVar(in []string) []corev1.EnvVar {
