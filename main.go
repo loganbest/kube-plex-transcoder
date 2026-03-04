@@ -235,7 +235,7 @@ if touch "/tmp/pms-eae-test/EasyAudioEncoder/Convert to WAV (to 8ch or less)/tes
 echo "=== Writeability check complete ==="`},
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "transcode", MountPath: "/transcode"},
-						{Name: "transcode", MountPath: "/tmp"},
+						{Name: "tmp", MountPath: "/tmp"},
 					},
 				},
 			},
@@ -264,11 +264,10 @@ echo "=== Writeability check complete ==="`},
 							Name:      "transcode",
 							MountPath: "/transcode",
 						},
-						// EAE (Easy Audio Encoder) hardcodes /tmp and ignores TMPDIR. Mount transcode at /tmp
-						// so EAE watchfolder writes succeed. With hostPath, transcoder must run on same node as PMS.
-						// Set NODE_NAME via downward API in your PMS deployment to enable same-node scheduling.
+						// EAE (Easy Audio Encoder) hardcodes /tmp and uses a watchfolder (likely inotify).
+						// NFSv3 does not support inotify; use emptyDir for /tmp so EAE works on NFS-backed transcode.
 						{
-							Name:      "transcode",
+							Name:      "tmp",
 							MountPath: "/tmp",
 						},
 						{
@@ -279,6 +278,12 @@ echo "=== Writeability check complete ==="`},
 				},
 			},
 			Volumes: []corev1.Volume{
+				{
+					Name: "tmp",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
 				{
 					Name: "data",
 					VolumeSource: corev1.VolumeSource{
@@ -350,35 +355,47 @@ func toCoreV1EnvVar(in []string) []corev1.EnvVar {
 
 func logPodLogs(ctx context.Context, cl kubernetes.Interface, pod *corev1.Pod) {
 	tailLines := int64(200)
+	// Log init containers first (e.g. check-writeability) so we preserve them before pod cleanup
+	for _, c := range pod.Spec.InitContainers {
+		fetchAndLogContainerLogs(ctx, cl, pod, c.Name, tailLines)
+	}
 	for _, c := range pod.Spec.Containers {
-		opts := &corev1.PodLogOptions{
-			Container: c.Name,
-			TailLines: &tailLines,
+		fetchAndLogContainerLogs(ctx, cl, pod, c.Name, tailLines)
+	}
+}
+
+func fetchAndLogContainerLogs(ctx context.Context, cl kubernetes.Interface, pod *corev1.Pod, container string, tailLines int64) {
+	opts := &corev1.PodLogOptions{
+		Container: container,
+		TailLines: &tailLines,
+	}
+	req := cl.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, opts)
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		if strings.Contains(err.Error(), "forbidden") || strings.Contains(err.Error(), "cannot get") {
+			slog.Warn("cannot fetch pod logs: service account needs pods/log permission",
+				"pod", pod.Name, "container", container, "hint", "see deploy/rbac-pod-logs.yaml")
+		} else {
+			slog.Warn("failed to get pod logs", "pod", pod.Name, "container", container, "err", err)
 		}
-		req := cl.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, opts)
-		stream, err := req.Stream(ctx)
-		if err != nil {
-			if strings.Contains(err.Error(), "forbidden") || strings.Contains(err.Error(), "cannot get") {
-				slog.Warn("cannot fetch pod logs: service account needs pods/log permission",
-					"pod", pod.Name, "container", c.Name, "hint", "see deploy/rbac-pod-logs.yaml")
-			} else {
-				slog.Warn("failed to get pod logs", "pod", pod.Name, "container", c.Name, "err", err)
-			}
-			continue
-		}
-		var buf bytes.Buffer
-		if _, err := io.Copy(&buf, stream); err != nil {
-			stream.Close()
-			slog.Warn("failed to read pod logs", "pod", pod.Name, "container", c.Name, "err", err)
-			continue
-		}
+		return
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, stream); err != nil {
 		stream.Close()
-		logs := strings.TrimSpace(buf.String())
-		if logs != "" {
+		slog.Warn("failed to read pod logs", "pod", pod.Name, "container", container, "err", err)
+		return
+	}
+	stream.Close()
+	logs := strings.TrimSpace(buf.String())
+	if logs != "" {
+		if container == "plex" {
 			if summary := extractLogSummary(logs); summary != "" {
-				slog.Info("pod container logs (errors/warnings)", "pod", pod.Name, "container", c.Name, "summary", summary)
+				slog.Info("pod container logs (errors/warnings)", "pod", pod.Name, "container", container, "summary", summary)
 			}
-			slog.Info("pod container logs (full)", "pod", pod.Name, "container", c.Name, "logs", logs)
+			slog.Info("pod container logs (full)", "pod", pod.Name, "container", container, "logs", logs)
+		} else {
+			slog.Info("pod init container logs", "pod", pod.Name, "container", container, "logs", logs)
 		}
 	}
 }

@@ -23,21 +23,15 @@ report information back to Plex about the state of the transcode job. At some
 point in the future this may change, but it is a required step in order to make
 transcodes work right now.
 
-### EAC3 audio (EAE) and hostPath transcode
+### EAC3 audio (EAE) and NFS
+
+EAE uses a watchfolder (likely inotify) which NFSv3 does not support. The
+transcoder pod uses `emptyDir` for `/tmp` so EAE works regardless of whether
+`/transcode` is backed by NFS.
 
 When using `TRANSCODE_DIR` (hostPath) instead of `TRANSCODE_PVC`, the transcoder
-pod must run on the same node as PMS so both share the same `/tmp` for EAE.
-Add this to your PMS container env to enable same-node scheduling:
-
-```yaml
-env:
-  - name: NODE_NAME
-    valueFrom:
-      fieldRef:
-        fieldPath: spec.nodeName
-```
-
-With `TRANSCODE_PVC` (shared storage), this is not required.
+pod must run on the same node as PMS. Add `NODE_NAME` via downward API in your
+PMS deployment to enable same-node scheduling.
 
 ### Debug logging
 
@@ -48,11 +42,9 @@ more verbose logs when troubleshooting.
 ### Writeability check
 
 Each transcoder pod runs an init container that tests writeability of `/tmp` and
-`/transcode` before the main transcoder starts. View the init container logs with:
-
-```bash
-kubectl logs <pod-name> -c check-writeability -n <namespace>
-```
+`/transcode` before the main transcoder starts. On pod failure, the shim fetches
+and logs init container output so it is preserved even when failed pods are
+cleaned up.
 
 ## Setup
 
